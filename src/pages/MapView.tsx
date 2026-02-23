@@ -1,9 +1,9 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { motion } from "framer-motion";
-import { MapContainer, TileLayer, Marker, Popup, Circle } from "react-leaflet";
+import { MapContainer, TileLayer, Marker, Popup, Circle, useMap } from "react-leaflet";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
-import { MapPin, Shield, Users, Navigation, Layers } from "lucide-react";
+import { MapPin, Navigation, Shield, AlertTriangle, Locate } from "lucide-react";
 import GlassCard from "@/components/GlassCard";
 import { getNearbyVolunteers } from "@/lib/api";
 
@@ -15,75 +15,119 @@ L.Icon.Default.mergeOptions({
   shadowUrl: "https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-shadow.png",
 });
 
-const userPos: [number, number] = [17.4268, 78.4484];
+const DEFAULT_POS: [number, number] = [17.3850, 78.4867];
 
-const createColoredIcon = (color: string) =>
-  L.divIcon({
-    html: `<div style="width:14px;height:14px;border-radius:50%;background:${color};border:2px solid rgba(255,255,255,0.6);box-shadow:0 0 8px ${color}"></div>`,
+const createZoneIcon = (risk: number) => {
+  const color = risk <= 30 ? "hsl(160,84%,39%)" : risk <= 60 ? "hsl(38,95%,50%)" : "hsl(0,84%,60%)";
+  return L.divIcon({
+    html: `<div style="display:flex;align-items:center;justify-content:center;width:20px;height:20px;border-radius:50%;background:${color};border:2px solid rgba(255,255,255,0.7);box-shadow:0 0 8px ${color};font-size:9px;font-weight:700;color:#fff">⊕</div>`,
     className: "",
-    iconSize: [14, 14],
-    iconAnchor: [7, 7],
+    iconSize: [20, 20],
+    iconAnchor: [10, 10],
   });
+};
 
 const userIcon = L.divIcon({
-  html: `<div style="width:18px;height:18px;border-radius:50%;background:hsl(160,84%,39%);border:3px solid white;box-shadow:0 0 16px hsl(160,84%,39%)"><div style="position:absolute;inset:-6px;border-radius:50%;background:hsl(160,84%,39%,0.2);animation:ping 1.5s ease infinite"></div></div>`,
+  html: `<div style="position:relative;width:22px;height:22px;border-radius:50%;background:hsl(217,91%,60%);border:3px solid white;box-shadow:0 0 16px hsl(217,91%,60%)"><div style="position:absolute;inset:-8px;border-radius:50%;border:2px solid hsl(217,91%,60%,0.4);animation:ping 2s ease infinite"></div></div>`,
   className: "",
-  iconSize: [18, 18],
-  iconAnchor: [9, 9],
+  iconSize: [22, 22],
+  iconAnchor: [11, 11],
 });
 
-export default function MapView() {
-  const [volunteers, setVolunteers] = useState<any[]>([]);
-  const [safeZones, setSafeZones] = useState<any[]>([]);
-  const [activeLayer, setActiveLayer] = useState<"volunteers" | "zones" | "both">("both");
+// Zone data with risk scores
+const zones = [
+  { id: 1, name: "Hospital 2 Warangal", lat: 17.3920, lng: 78.4750, risk: 0, type: "Security" },
+  { id: 2, name: "Panjagutta Police Station", lat: 17.4268, lng: 78.4484, risk: 12, type: "Police" },
+  { id: 3, name: "Apollo Hospitals", lat: 17.4100, lng: 78.4800, risk: 8, type: "Hospital" },
+  { id: 4, name: "City Center Mall", lat: 17.3950, lng: 78.5000, risk: 15, type: "Public" },
+  { id: 5, name: "Dilsukh Nagar Junction", lat: 17.3690, lng: 78.5250, risk: 45, type: "Transit" },
+  { id: 6, name: "Chaitanyapuri Main Rd", lat: 17.3720, lng: 78.5150, risk: 38, type: "Road" },
+  { id: 7, name: "High Risk 3 Khammam", lat: 17.3780, lng: 78.5050, risk: 74, type: "Area" },
+  { id: 8, name: "Saidabad Colony", lat: 17.3600, lng: 78.5100, risk: 62, type: "Area" },
+  { id: 9, name: "Malakpet Area", lat: 17.3850, lng: 78.4950, risk: 55, type: "Area" },
+  { id: 10, name: "Moosarambagh", lat: 17.3900, lng: 78.4850, risk: 22, type: "Area" },
+  { id: 11, name: "Akbar Bagh Colony", lat: 17.3750, lng: 78.4700, risk: 68, type: "Area" },
+  { id: 12, name: "New Market", lat: 17.3880, lng: 78.4600, risk: 33, type: "Market" },
+  { id: 13, name: "Saroor Nagar", lat: 17.3550, lng: 78.5200, risk: 70, type: "Area" },
+  { id: 14, name: "Gaddiannaram", lat: 17.3650, lng: 78.4900, risk: 28, type: "Area" },
+  { id: 15, name: "East Prasanthi Nagar", lat: 17.3980, lng: 78.4780, risk: 10, type: "Residential" },
+];
 
+function FlyToLocation({ pos }: { pos: [number, number] }) {
+  const map = useMap();
   useEffect(() => {
-    getNearbyVolunteers(userPos[0], userPos[1]).then((d) => {
-      setVolunteers(d.volunteers || []);
-      setSafeZones(d.safe_zones || []);
-    });
+    map.flyTo(pos, 14, { duration: 1.2 });
+  }, [pos, map]);
+  return null;
+}
+
+export default function MapView() {
+  const [userPos, setUserPos] = useState<[number, number]>(DEFAULT_POS);
+  const [locating, setLocating] = useState(false);
+  const [riskScore, setRiskScore] = useState(0);
+  const [safeZones] = useState(zones);
+
+  const nearestSafe = [...safeZones].filter(z => z.risk <= 30).sort((a, b) => {
+    const distA = Math.hypot(a.lat - userPos[0], a.lng - userPos[1]);
+    const distB = Math.hypot(b.lat - userPos[0], b.lng - userPos[1]);
+    return distA - distB;
+  })[0];
+
+  const nearestDanger = [...safeZones].filter(z => z.risk > 60).sort((a, b) => {
+    const distA = Math.hypot(a.lat - userPos[0], a.lng - userPos[1]);
+    const distB = Math.hypot(b.lat - userPos[0], b.lng - userPos[1]);
+    return distA - distB;
+  })[0];
+
+  const getDistanceM = (z: typeof zones[0]) => {
+    const R = 6371000;
+    const dLat = ((z.lat - userPos[0]) * Math.PI) / 180;
+    const dLng = ((z.lng - userPos[1]) * Math.PI) / 180;
+    const a = Math.sin(dLat / 2) ** 2 + Math.cos((userPos[0] * Math.PI) / 180) * Math.cos((z.lat * Math.PI) / 180) * Math.sin(dLng / 2) ** 2;
+    return Math.round(R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)));
+  };
+
+  const statusLabel = riskScore <= 30 ? "SAFE ZONE" : riskScore <= 60 ? "CAUTION ZONE" : "DANGER ZONE";
+  const statusColor = riskScore <= 30 ? "safe" : riskScore <= 60 ? "caution" : "danger";
+
+  const handleLocate = useCallback(() => {
+    setLocating(true);
+    if (navigator.geolocation) {
+      navigator.geolocation.getCurrentPosition(
+        (pos) => {
+          setUserPos([pos.coords.latitude, pos.coords.longitude]);
+          setLocating(false);
+        },
+        () => {
+          setUserPos(DEFAULT_POS);
+          setLocating(false);
+        },
+        { enableHighAccuracy: true }
+      );
+    } else {
+      setLocating(false);
+    }
   }, []);
 
-  const volunteerPositions: [number, number][] = [
-    [17.4298, 78.4510],
-    [17.4240, 78.4450],
-    [17.4310, 78.4420],
-    [17.4200, 78.4530],
-    [17.4280, 78.4390],
-  ];
+  // Calculate risk score for current position
+  useEffect(() => {
+    const nearest = [...safeZones].sort((a, b) => {
+      const distA = Math.hypot(a.lat - userPos[0], a.lng - userPos[1]);
+      const distB = Math.hypot(b.lat - userPos[0], b.lng - userPos[1]);
+      return distA - distB;
+    });
+    setRiskScore(nearest[0]?.risk ?? 0);
+  }, [userPos, safeZones]);
 
   return (
-    <div className="h-full flex flex-col p-6 gap-4">
-      <motion.div
-        initial={{ opacity: 0, y: -10 }}
-        animate={{ opacity: 1, y: 0 }}
-        className="flex items-center justify-between"
-      >
-        <div>
-          <h2 className="text-xl font-bold">Live Map</h2>
-          <p className="text-muted-foreground text-xs mt-0.5">Real-time volunteer & safe zone tracking</p>
-        </div>
-
-        {/* Layer toggles */}
-        <div className="flex items-center gap-2">
-          {(["volunteers", "zones", "both"] as const).map((layer) => (
-            <button
-              key={layer}
-              onClick={() => setActiveLayer(layer)}
-              className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all capitalize ${
-                activeLayer === layer
-                  ? "bg-safe/15 border border-safe/30 text-safe"
-                  : "bg-secondary/60 border border-white/[0.06] text-muted-foreground hover:text-foreground"
-              }`}
-            >
-              {layer === "both" ? "All Layers" : layer}
-            </button>
-          ))}
-        </div>
+    <div className="h-full flex flex-col p-4 gap-3">
+      <motion.div initial={{ opacity: 0, y: -10 }} animate={{ opacity: 1, y: 0 }} className="flex items-center gap-2">
+        <Shield size={18} className="text-safe" />
+        <h2 className="text-lg font-bold">Armour Safety Map</h2>
       </motion.div>
 
       <div className="flex gap-4 flex-1 min-h-0">
-        {/* Map */}
+        {/* Map — takes most space */}
         <motion.div
           initial={{ opacity: 0, scale: 0.98 }}
           animate={{ opacity: 1, scale: 1 }}
@@ -91,117 +135,113 @@ export default function MapView() {
           className="flex-1 rounded-2xl overflow-hidden border border-white/[0.06]"
           style={{ minHeight: 400 }}
         >
-          <MapContainer
-            center={userPos}
-            zoom={14}
-            style={{ width: "100%", height: "100%", minHeight: 400 }}
-            zoomControl={false}
-          >
-            <TileLayer
-              url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-              attribution=""
-            />
+          <MapContainer center={userPos} zoom={14} style={{ width: "100%", height: "100%", minHeight: 400 }} zoomControl={false}>
+            <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" attribution="" />
+            <FlyToLocation pos={userPos} />
 
-            {/* User location */}
+            {/* User marker */}
             <Marker position={userPos} icon={userIcon}>
               <Popup>
-                <div style={{ background: "hsl(220,15%,10%)", color: "white", padding: "8px", borderRadius: "8px", minWidth: 120 }}>
-                  <strong className="text-safe">📍 Your Location</strong>
+                <div style={{ background: "hsl(220,15%,10%)", color: "white", padding: "10px 14px", borderRadius: "10px", minWidth: 140 }}>
+                  <strong style={{ color: "hsl(217,91%,60%)" }}>📍 Your Location</strong>
                   <br />
-                  <span style={{ fontSize: 11 }}>City Center Mall</span>
+                  <span style={{ fontSize: 11 }}>Risk Score: {riskScore}/100</span>
                 </div>
               </Popup>
             </Marker>
 
-            {/* Safe radius */}
-            {(activeLayer === "zones" || activeLayer === "both") && (
-              <Circle
-                center={userPos}
-                radius={500}
-                pathOptions={{ color: "hsl(160,84%,39%)", fillColor: "hsl(160,84%,39%)", fillOpacity: 0.05, weight: 1.5 }}
-              />
-            )}
+            {/* Zone markers */}
+            {safeZones.map((zone) => (
+              <Marker key={zone.id} position={[zone.lat, zone.lng]} icon={createZoneIcon(zone.risk)}>
+                <Popup>
+                  <div style={{ background: "hsl(220,15%,10%)", color: "white", padding: "10px 14px", borderRadius: "10px", minWidth: 150 }}>
+                    <strong style={{ color: zone.risk <= 30 ? "hsl(160,84%,39%)" : zone.risk <= 60 ? "hsl(38,95%,50%)" : "hsl(0,84%,60%)" }}>
+                      {zone.name}
+                    </strong>
+                    <br />
+                    <span style={{ fontSize: 11 }}>Risk: {zone.risk}/100 • {zone.type}</span>
+                  </div>
+                </Popup>
+              </Marker>
+            ))}
 
-            {/* Volunteers */}
-            {(activeLayer === "volunteers" || activeLayer === "both") &&
-              volunteerPositions.map((pos, i) => (
-                <Marker key={i} position={pos} icon={createColoredIcon("#10B981")}>
-                  <Popup>
-                    <div style={{ background: "hsl(220,15%,10%)", color: "white", padding: "8px", borderRadius: "8px" }}>
-                      <strong style={{ color: "hsl(160,84%,39%)" }}>{volunteers[i]?.name || `Volunteer ${i + 1}`}</strong>
-                      <br />
-                      <span style={{ fontSize: 11 }}>{volunteers[i]?.distance || "Nearby"} • Online</span>
-                    </div>
-                  </Popup>
-                </Marker>
-              ))}
+            {/* Safe radius around user */}
+            <Circle
+              center={userPos}
+              radius={600}
+              pathOptions={{ color: "hsl(217,91%,60%)", fillColor: "hsl(217,91%,60%)", fillOpacity: 0.06, weight: 1 }}
+            />
           </MapContainer>
         </motion.div>
 
-        {/* Side panel */}
+        {/* Right sidebar */}
         <motion.div
           initial={{ opacity: 0, x: 16 }}
           animate={{ opacity: 1, x: 0 }}
-          transition={{ delay: 0.2 }}
-          className="w-64 flex flex-col gap-3 overflow-y-auto"
+          transition={{ delay: 0.15 }}
+          className="w-72 flex flex-col gap-3 overflow-y-auto"
         >
-          {/* Current location */}
-          <GlassCard variant="safe" padding="sm">
-            <div className="flex items-center gap-2 mb-2">
-              <Navigation size={14} className="text-safe" />
-              <span className="text-xs font-semibold text-safe">Current Location</span>
-            </div>
-            <p className="text-sm font-medium">City Center Mall</p>
-            <p className="text-xs text-muted-foreground mt-0.5">Panjagutta, Hyderabad</p>
-            <div className="flex items-center gap-1.5 mt-2">
-              <div className="w-1.5 h-1.5 rounded-full bg-safe animate-pulse" />
-              <span className="text-xs text-safe font-medium">Safe Zone</span>
-            </div>
+          {/* Get My Location */}
+          <button
+            onClick={handleLocate}
+            disabled={locating}
+            className="w-full flex items-center justify-center gap-2 py-3 rounded-xl bg-primary text-primary-foreground font-semibold text-sm hover:bg-primary/90 transition-colors disabled:opacity-60"
+          >
+            <Locate size={16} className={locating ? "animate-spin" : ""} />
+            {locating ? "Locating…" : "Get My Location"}
+          </button>
+
+          {/* Current Status */}
+          <GlassCard variant={statusColor as any} padding="sm">
+            <p className="text-xs font-semibold text-muted-foreground mb-1">Current Status</p>
+            <p className={`text-lg font-extrabold text-${statusColor}`}>{statusLabel}</p>
+            <p className="text-xs text-muted-foreground mt-0.5">Risk Score: {riskScore}/100</p>
           </GlassCard>
 
-          {/* Volunteers */}
-          <GlassCard padding="sm">
-            <div className="flex items-center gap-2 mb-3">
-              <Users size={14} className="text-primary" />
-              <span className="text-xs font-semibold">Nearby Patrollers</span>
-            </div>
-            <div className="space-y-2.5">
-              {volunteers.slice(0, 4).map((vol) => (
-                <div key={vol.id} className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <div className="relative">
-                      <div className="w-6 h-6 rounded-full bg-secondary flex items-center justify-center text-[10px] font-bold">
-                        {vol.name[0]}
-                      </div>
-                      <div className={`absolute -bottom-0.5 -right-0.5 w-1.5 h-1.5 rounded-full border border-background ${vol.status === "online" ? "bg-safe" : "bg-muted-foreground"}`} />
-                    </div>
-                    <div>
-                      <p className="text-[11px] font-medium leading-none">{vol.name}</p>
-                      <p className="text-[10px] text-muted-foreground">{vol.distance}</p>
-                    </div>
-                  </div>
-                  <button className="text-[10px] px-2 py-0.5 rounded-md bg-safe/10 text-safe border border-safe/20 hover:bg-safe/20 transition-colors">
-                    Alert
-                  </button>
-                </div>
-              ))}
-            </div>
-          </GlassCard>
+          {/* Nearest Safe Zone */}
+          {nearestSafe && (
+            <GlassCard variant="safe" padding="sm">
+              <div className="flex items-center gap-1.5 mb-2">
+                <div className="w-2.5 h-2.5 rounded-full bg-safe" />
+                <span className="text-xs font-semibold text-safe">Nearest Safe Zone</span>
+              </div>
+              <p className="text-sm font-bold">{nearestSafe.name}</p>
+              <div className="flex items-center gap-1.5 mt-1">
+                <MapPin size={12} className="text-safe" />
+                <span className="text-xs text-muted-foreground">{getDistanceM(nearestSafe)}m away</span>
+              </div>
+              <p className="text-[10px] text-muted-foreground mt-0.5">{nearestSafe.type}</p>
+            </GlassCard>
+          )}
 
-          {/* Safe Zones */}
+          {/* Nearest Danger Zone */}
+          {nearestDanger && (
+            <GlassCard variant="danger" padding="sm">
+              <div className="flex items-center gap-1.5 mb-2">
+                <div className="w-2.5 h-2.5 rounded-full bg-danger" />
+                <span className="text-xs font-semibold text-danger">Nearest Danger Zone</span>
+              </div>
+              <p className="text-sm font-bold">{nearestDanger.name}</p>
+              <div className="flex items-center gap-1.5 mt-1">
+                <AlertTriangle size={12} className="text-caution" />
+                <span className="text-xs text-muted-foreground">{getDistanceM(nearestDanger)}m away</span>
+              </div>
+              <p className="text-[10px] text-muted-foreground mt-0.5">Risk: {nearestDanger.risk}/100</p>
+            </GlassCard>
+          )}
+
+          {/* Map Legend */}
           <GlassCard padding="sm">
-            <div className="flex items-center gap-2 mb-3">
-              <Shield size={14} className="text-safe" />
-              <span className="text-xs font-semibold">Safe Zones</span>
-            </div>
-            <div className="space-y-2.5">
-              {safeZones.map((zone) => (
-                <div key={zone.id} className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <MapPin size={11} className="text-safe shrink-0" />
-                    <span className="text-[11px] text-foreground/80">{zone.name}</span>
-                  </div>
-                  <span className="text-[11px] font-semibold text-safe">{zone.distance}</span>
+            <p className="text-xs font-bold mb-2.5">Map Legend</p>
+            <div className="space-y-2">
+              {[
+                { label: "Safe Zones (0-30)", color: "bg-safe" },
+                { label: "Caution Zones (31-60)", color: "bg-caution" },
+                { label: "High Risk Zones (61-100)", color: "bg-danger" },
+              ].map((item) => (
+                <div key={item.label} className="flex items-center gap-2">
+                  <div className={`w-3 h-3 rounded-full ${item.color} shrink-0`} />
+                  <span className="text-[11px] text-muted-foreground">{item.label}</span>
                 </div>
               ))}
             </div>
